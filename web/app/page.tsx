@@ -2,205 +2,356 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import type * as Leaflet from "leaflet"
+import { Radar, TowerControl } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { api } from "@/lib/api"
+import type { AircraftEstimate, FeedEvent, SensorSnapshot, StatsSnapshot } from "@/lib/types"
 
-type SensorEvent = {
-  type: "sensor"
-  id: string
-  lat: number
-  lon: number
+const DEFAULT_CENTER: [number, number] = [50.11, -5.59]
+const DEFAULT_ZOOM = 9
+
+const FALLBACK_STATS: StatsSnapshot = {
+  active_sensors: 0,
+  tracked_aircraft: 0,
+  total_packets: 0,
+  solved_clusters: 0,
+  failed_clusters: 0,
+  last_solution_at: "",
+  last_packet_ingest: "",
+  server_started_at: "",
 }
 
-type AircraftEvent = {
-  type: "aircraft"
-  id: string
-  lat: number
-  lon: number
-  hexData: string
+type MarkerStore = {
+  sensors: Record<string, Leaflet.CircleMarker>
+  aircraft: Record<string, Leaflet.Marker>
 }
 
-type FeedEvent = SensorEvent | AircraftEvent
-
-type FlightCard = {
-  id: string
-  hexData: string
-  seenAt: number
+function confidenceClass(confidence: AircraftEstimate["confidence"]): string {
+  if (confidence === "high") return "chip chip-high"
+  if (confidence === "medium") return "chip chip-medium"
+  return "chip chip-low"
 }
-
-const DEFAULT_CENTER: [number, number] = [50.15, -5.65]
-const DEFAULT_ZOOM = 8
 
 export default function Page() {
   const mapNodeRef = useRef<HTMLDivElement | null>(null)
   const mapRef = useRef<Leaflet.Map | null>(null)
-  const markersRef = useRef<Record<string, Leaflet.CircleMarker | Leaflet.Marker>>({})
-  const [isConnected, setIsConnected] = useState(false)
-  const [flights, setFlights] = useState<FlightCard[]>([])
+  const markersRef = useRef<MarkerStore>({ sensors: {}, aircraft: {} })
 
-  const flightCount = useMemo(() => flights.length, [flights])
+  const [status, setStatus] = useState<"connecting" | "live" | "down">("connecting")
+  const [sensors, setSensors] = useState<SensorSnapshot[]>([])
+  const [aircraft, setAircraft] = useState<AircraftEstimate[]>([])
+  const [stats, setStats] = useState<StatsSnapshot>(FALLBACK_STATS)
+  const [error, setError] = useState<string>("")
+
+  const activeAircraft = useMemo(() => aircraft.slice(0, 40), [aircraft])
 
   useEffect(() => {
-    if (!mapNodeRef.current || mapRef.current) {
-      return
+    let mounted = true
+    ;(async () => {
+      try {
+        const [health, initialSensors, initialAircraft, initialStats] = await Promise.all([
+          api.health(),
+          api.sensors(),
+          api.aircraft(),
+          api.stats(),
+        ])
+        if (!mounted) return
+        if (!health.ok) {
+          throw new Error("API health check failed")
+        }
+        setSensors(initialSensors)
+        setAircraft(initialAircraft)
+        setStats(initialStats)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Unable to reach MLAT API")
+      }
+    })()
+
+    return () => {
+      mounted = false
     }
+  }, [])
+
+  useEffect(() => {
+    if (!mapNodeRef.current || mapRef.current) return
 
     let active = true
-    let eventSource: EventSource | null = null
+    let source: EventSource | null = null
     let map: Leaflet.Map | null = null
 
     void import("leaflet").then((L) => {
-      if (!active || !mapNodeRef.current) {
-        return
-      }
+      if (!active || !mapNodeRef.current) return
 
       map = L.map(mapNodeRef.current, {
         zoomControl: true,
         attributionControl: true,
       }).setView(DEFAULT_CENTER, DEFAULT_ZOOM)
-      const currentMap = map
+      mapRef.current = map
 
-      mapRef.current = currentMap
-
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
         attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-      }).addTo(currentMap)
+      }).addTo(map)
 
-      const planeIcon = L.icon({
-        iconUrl: "https://cdn-icons-png.flaticon.com/512/3135/3135715.png",
+      const sensorStyle = {
+        color: "#1d4ed8",
+        fillColor: "#60a5fa",
+        radius: 7,
+        fillOpacity: 0.9,
+        weight: 2,
+      }
+
+      const planeIcon = L.divIcon({
+        html: '<span class="plane-dot"></span>',
+        className: "plane-pin",
         iconSize: [20, 20],
-        className: "plane-icon",
       })
 
-      eventSource = new EventSource("/events")
-
-      eventSource.onopen = () => {
-        setIsConnected(true)
+      source = new EventSource("/events")
+      source.onopen = () => {
+        setStatus("live")
       }
 
-      eventSource.onerror = () => {
-        setIsConnected(false)
+      source.onerror = () => {
+        setStatus("down")
       }
 
-      eventSource.onmessage = (event) => {
-        let data: FeedEvent
+      source.onmessage = (event) => {
+        let payload: FeedEvent
         try {
-          data = JSON.parse(event.data) as FeedEvent
+          payload = JSON.parse(event.data) as FeedEvent
         } catch {
           return
         }
 
-        if (!Number.isFinite(data.lat) || !Number.isFinite(data.lon)) {
+        if (!Number.isFinite(payload.lat) || !Number.isFinite(payload.lon)) {
           return
         }
 
-        if (data.type === "sensor") {
-          if (!markersRef.current[data.id]) {
-            markersRef.current[data.id] = L.circleMarker([data.lat, data.lon], {
-              color: "#10b981",
-              radius: 6,
-              fillOpacity: 1,
-            })
-              .addTo(currentMap)
-              .bindPopup(`<b>Receiver Tower</b><br>ID: ${data.id}`)
+        if (payload.type === "sensor") {
+          setSensors((prev) => {
+            const existing = prev.find((sensor) => sensor.id === payload.id)
+            if (existing) {
+              return prev.map((sensor) =>
+                sensor.id === payload.id
+                  ? {
+                      ...sensor,
+                      lat: payload.lat,
+                      lon: payload.lon,
+                      alt: payload.alt,
+                      last_seen: new Date().toISOString(),
+                    }
+                  : sensor,
+              )
+            }
+            return [
+              {
+                id: payload.id,
+                sensor_id: 0,
+                lat: payload.lat,
+                lon: payload.lon,
+                alt: payload.alt,
+                last_seen: new Date().toISOString(),
+              },
+              ...prev,
+            ]
+          })
+
+          const existingMarker = markersRef.current.sensors[payload.id]
+          if (existingMarker) {
+            existingMarker.setLatLng([payload.lat, payload.lon])
+          } else if (map) {
+            markersRef.current.sensors[payload.id] = L.circleMarker([payload.lat, payload.lon], sensorStyle)
+              .addTo(map)
+              .bindTooltip(`Sensor ${payload.id.slice(0, 10)}...`)
           }
           return
         }
 
-        if (markersRef.current[data.id]) {
-          markersRef.current[data.id].setLatLng([data.lat, data.lon])
-        } else {
-          markersRef.current[data.id] = L.marker([data.lat, data.lon], {
+        setAircraft((prev) => {
+          const next: AircraftEstimate = {
+            icao: payload.id,
+            lat: payload.lat,
+            lon: payload.lon,
+            alt: payload.alt,
+            confidence: payload.confidence,
+            residual_m: payload.residual_m,
+            sensors: payload.sensors,
+            updated_at: new Date().toISOString(),
+            raw_hex: payload.hexData,
+          }
+
+          const idx = prev.findIndex((item) => item.icao === payload.id)
+          if (idx >= 0) {
+            const updated = [...prev]
+            updated[idx] = next
+            updated.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
+            return updated
+          }
+
+          return [next, ...prev].slice(0, 120)
+        })
+
+        const existingFlightMarker = markersRef.current.aircraft[payload.id]
+        if (existingFlightMarker) {
+          existingFlightMarker.setLatLng([payload.lat, payload.lon])
+        } else if (map) {
+          markersRef.current.aircraft[payload.id] = L.marker([payload.lat, payload.lon], {
             icon: planeIcon,
           })
-            .addTo(currentMap)
-            .bindPopup(`<b>Aircraft ICAO:</b> ${data.id}`)
-
-          setFlights((prev) => {
-            if (prev.some((flight) => flight.id === data.id)) {
-              return prev
-            }
-
-            const next = [{ id: data.id, hexData: data.hexData, seenAt: Date.now() }, ...prev]
-            return next.slice(0, 100)
-          })
+            .addTo(map)
+            .bindTooltip(`ICAO ${payload.id}`)
         }
       }
     })
 
     return () => {
       active = false
-      eventSource?.close()
-      setIsConnected(false)
+      source?.close()
       map?.remove()
       mapRef.current = null
-      markersRef.current = {}
+      markersRef.current = { sensors: {}, aircraft: {} }
     }
   }, [])
 
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+
+    void import("leaflet").then((L) => {
+      const sensorStyle = {
+        color: "#1d4ed8",
+        fillColor: "#60a5fa",
+        radius: 7,
+        fillOpacity: 0.9,
+        weight: 2,
+      }
+
+      for (const sensor of sensors) {
+        const existing = markersRef.current.sensors[sensor.id]
+        if (existing) {
+          existing.setLatLng([sensor.lat, sensor.lon])
+          continue
+        }
+
+        markersRef.current.sensors[sensor.id] = L.circleMarker([sensor.lat, sensor.lon], sensorStyle)
+          .addTo(map)
+          .bindTooltip(`Sensor ${sensor.id.slice(0, 10)}...`)
+      }
+    })
+  }, [sensors])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+
+    void import("leaflet").then((L) => {
+      const planeIcon = L.divIcon({
+        html: '<span class="plane-dot"></span>',
+        className: "plane-pin",
+        iconSize: [20, 20],
+      })
+
+      for (const flight of aircraft) {
+        const existing = markersRef.current.aircraft[flight.icao]
+        if (existing) {
+          existing.setLatLng([flight.lat, flight.lon])
+          continue
+        }
+
+        markersRef.current.aircraft[flight.icao] = L.marker([flight.lat, flight.lon], {
+          icon: planeIcon,
+        })
+          .addTo(map)
+          .bindTooltip(`ICAO ${flight.icao}`)
+      }
+    })
+  }, [aircraft])
+
+  useEffect(() => {
+    setStats((prev) => ({
+      ...prev,
+      active_sensors: sensors.length,
+      tracked_aircraft: aircraft.length,
+    }))
+  }, [aircraft.length, sensors.length])
+
   return (
-    <main className="h-svh overflow-hidden bg-slate-950 text-slate-100">
-      <div className="relative flex h-full flex-col md:flex-row">
-        <aside className="z-20 flex h-[45%] w-full flex-col border-b border-slate-700/80 bg-slate-900/95 backdrop-blur md:h-full md:w-[350px] md:border-r md:border-b-0">
-          <Card className="rounded-none border-0 border-b border-slate-700/90 bg-slate-950/80 py-0 ring-0">
-            <CardHeader className="space-y-2 p-5">
-              <CardTitle className="text-lg tracking-[0.16em] uppercase text-sky-400">
-                Blue-Glide Oracle
-              </CardTitle>
-              <div className="flex items-center gap-2 text-xs text-emerald-400">
-                <span className="relative inline-flex size-2">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-70" />
-                  <span className="relative inline-flex size-2 rounded-full bg-emerald-400" />
-                </span>
-                {isConnected ? "Network Connected" : "Reconnecting Feed"}
-              </div>
-            </CardHeader>
-          </Card>
-
-          <div className="flex items-center justify-between px-5 py-3">
-            <p className="text-xs tracking-[0.12em] text-slate-400 uppercase">Active Flights</p>
-            <Badge
-              variant="outline"
-              className="border-sky-400/40 bg-sky-500/10 font-mono text-sky-300"
-            >
-              {flightCount}
-            </Badge>
+    <main className="hud-root">
+      <div className="hud-shell">
+        <header className="hud-header">
+          <div>
+            <p className="hud-kicker">4DSKY CHALLENGE</p>
+            <h1>Blue Glide Multilateration Console</h1>
           </div>
+          <div className="status-wrap">
+            <span className={`status-dot ${status}`} />
+            <span className="status-text">
+              {status === "live" ? "LIVE FEED" : status === "connecting" ? "CONNECTING" : "RECONNECTING"}
+            </span>
+          </div>
+        </header>
 
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 pb-3">
-            {flights.length === 0 ? (
-              <Card className="border border-slate-700/80 bg-slate-800/80 py-0 ring-0">
-                <CardContent className="p-3 text-xs text-slate-400">
-                  Waiting for aircraft events from /events.
-                </CardContent>
-              </Card>
-            ) : (
-              flights.map((flight) => (
-                <Card
-                  key={flight.id}
-                  className="border border-slate-700/80 bg-slate-700/70 py-0 ring-0"
-                >
-                  <CardContent className="space-y-1 border-l-4 border-l-sky-400 p-3 font-mono text-sm">
+        <section className="metrics">
+          <article className="metric-card">
+            <TowerControl size={16} />
+            <div>
+              <p>Sensors</p>
+              <strong>{stats.active_sensors}</strong>
+            </div>
+          </article>
+          <article className="metric-card">
+            <Radar size={16} />
+            <div>
+              <p>Tracked Aircraft</p>
+              <strong>{stats.tracked_aircraft}</strong>
+            </div>
+          </article>
+          <article className="metric-card">
+            <span className="metric-label">Packets</span>
+            <strong>{stats.total_packets.toLocaleString()}</strong>
+          </article>
+          <article className="metric-card">
+            <span className="metric-label">Solved</span>
+            <strong>{stats.solved_clusters.toLocaleString()}</strong>
+          </article>
+        </section>
+
+        <section className="workspace">
+          <aside className="aircraft-panel">
+            <div className="panel-title-row">
+              <h2>Latest Solutions</h2>
+              <span className="chip">{activeAircraft.length} on scope</span>
+            </div>
+
+            {error ? <p className="error-callout">{error}</p> : null}
+
+            <ul className="aircraft-list">
+              {activeAircraft.length === 0 ? (
+                <li className="empty-state">Waiting for clusters with 3+ sensors...</li>
+              ) : (
+                activeAircraft.map((flight) => (
+                  <li key={flight.icao} className="aircraft-item">
+                    <div className="flight-top">
+                      <h3>{flight.icao}</h3>
+                      <span className={confidenceClass(flight.confidence)}>{flight.confidence}</span>
+                    </div>
                     <p>
-                      ICAO: <strong>{flight.id}</strong>
+                      {flight.lat.toFixed(5)}, {flight.lon.toFixed(5)} | alt {Math.round(flight.alt)} m
                     </p>
-                    <p className="text-[11px] tracking-[0.08em] text-slate-300 uppercase">
-                      VERIFIED BY: MLAT ENGINE
+                    <p>
+                      residual {Math.round(flight.residual_m)} m with {flight.sensors} sensors
                     </p>
-                    <p className="text-[11px] text-slate-400">
-                      LATEST HEX: {flight.hexData.substring(0, 14)}...
-                    </p>
-                  </CardContent>
-                </Card>
-              ))
-            )}
-          </div>
-        </aside>
+                    <p className="mono">{flight.raw_hex.slice(0, 22)}...</p>
+                  </li>
+                ))
+              )}
+            </ul>
+          </aside>
 
-        <section className="relative min-h-0 flex-1">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_18%_15%,rgba(56,189,248,0.14),transparent_28%),radial-gradient(circle_at_82%_84%,rgba(16,185,129,0.12),transparent_34%)]" />
-          <div ref={mapNodeRef} className="absolute inset-0" />
+          <div className="map-wrap">
+            <div className="map-overlay" />
+            <div ref={mapNodeRef} className="map-canvas" />
+          </div>
         </section>
       </div>
     </main>

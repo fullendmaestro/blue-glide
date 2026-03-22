@@ -1,12 +1,18 @@
-import { Geist, Geist_Mono } from "next/font/google"
+import { Bebas_Neue, Space_Grotesk } from "next/font/google"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
-import { cn } from "@/lib/utils";
+import { cn } from "@/lib/utils"
 
-const geist = Geist({subsets:['latin'],variable:'--font-sans'})
+const grotesk = Space_Grotesk({ subsets: ["latin"], variable: "--font-sans" })
 
-const fontMono = Geist_Mono({
+const headline = Bebas_Neue({
+  subsets: ["latin"],
+  variable: "--font-display",
+  weight: "400",
+})
+
+const mono = Space_Grotesk({
   subsets: ["latin"],
   variable: "--font-mono",
 })
@@ -20,7 +26,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={cn("antialiased", fontMono.variable, "font-sans", geist.variable)}
+      className={cn("antialiased", mono.variable, grotesk.variable, headline.variable)}
     >
       <body>
         <ThemeProvider>{children}</ThemeProvider>
