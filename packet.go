@@ -50,7 +50,7 @@ func uint64FromByte(bytes []byte) uint64 {
 }
 
 func ReadAndParseModeSPacket(stream network.Stream) (*ModeSPacket, error) {
-	if err := stream.SetReadDeadline(time.Now().Add(8 * time.Second)); err != nil {
+	if err := stream.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return nil, fmt.Errorf("set read deadline: %w", err)
 	}
 

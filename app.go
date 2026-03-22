@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log"
+	"net"
 	"sync"
 	"time"
 
@@ -60,6 +63,13 @@ func (app *BlueGlideApp) handleStreamFromPeer(stream network.Stream, peerID stri
 	for {
 		packet, err := ReadAndParseModeSPacket(stream)
 		if err != nil {
+			if isTimeoutError(err) {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				log.Printf("[%s] stream closed by peer", peerID)
+				return
+			}
 			if err != context.Canceled {
 				log.Printf("[%s] stream read stopped: %v", peerID, err)
 			}
@@ -79,6 +89,14 @@ func (app *BlueGlideApp) handleStreamFromPeer(stream network.Stream, peerID stri
 		}
 		app.mlatTracker.AddObservation(obs)
 	}
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	return false
 }
 
 func (app *BlueGlideApp) getOrCreateReceiver(peerID string, packet *ModeSPacket) *Receiver {

@@ -1,9 +1,10 @@
 package main
 
 import (
-	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,7 @@ type MlatTracker struct {
 	mu      sync.Mutex
 	pending map[string]*messageGroup
 	delay   time.Duration
+	window  time.Duration
 	onSolve func(AircraftEstimate)
 	onFail  func()
 }
@@ -30,20 +32,28 @@ func NewMlatTracker(delay time.Duration, onSolve func(AircraftEstimate), onFail 
 	return &MlatTracker{
 		pending: make(map[string]*messageGroup),
 		delay:   delay,
+		window:  2 * time.Millisecond,
 		onSolve: onSolve,
 		onFail:  onFail,
 	}
 }
 
 func (mt *MlatTracker) AddObservation(obs ReceiverObservation) {
-	key := hex.EncodeToString(obs.RawBytes)
+	icao, ok := decodeICAO(obs.RawBytes)
+	if !ok {
+		return
+	}
+
+	bucket := int64(obs.ReceiveTime / mt.window.Seconds())
+	key := fmt.Sprintf("%s:%d:%s", icao, bucket, hex.EncodeToString(obs.RawBytes))
 
 	mt.mu.Lock()
 	group, exists := mt.pending[key]
 	if !exists {
+		rawHex := hex.EncodeToString(obs.RawBytes)
 		group = &messageGroup{
 			key:          key,
-			rawHex:       key,
+			rawHex:       rawHex,
 			firstSeen:    obs.ObservedAt,
 			observations: make(map[string]ReceiverObservation),
 		}
@@ -82,6 +92,13 @@ func (mt *MlatTracker) resolve(key string) {
 		return obs[i].ReceiveTime < obs[j].ReceiveTime
 	})
 
+	if obs[len(obs)-1].ReceiveTime-obs[0].ReceiveTime > 0.010 {
+		if mt.onFail != nil {
+			mt.onFail()
+		}
+		return
+	}
+
 	position, rmseMeters, err := solveMLAT(obs)
 	if err != nil {
 		if mt.onFail != nil {
@@ -92,14 +109,27 @@ func (mt *MlatTracker) resolve(key string) {
 	}
 
 	lat, lon, alt := ecefToLLH(position)
-	if alt < -500 || alt > 20000 {
+	if alt < -500 || alt > 20000 || rmseMeters > 8000 {
 		if mt.onFail != nil {
 			mt.onFail()
 		}
 		return
 	}
 
-	icao := decodeICAO(obs[0].RawBytes)
+	if !withinNetworkEnvelope(position, obs) {
+		if mt.onFail != nil {
+			mt.onFail()
+		}
+		return
+	}
+
+	icao, ok := decodeICAO(obs[0].RawBytes)
+	if !ok {
+		if mt.onFail != nil {
+			mt.onFail()
+		}
+		return
+	}
 	confidence := scoreConfidence(rmseMeters, len(obs))
 
 	estimate := AircraftEstimate{
@@ -128,14 +158,45 @@ func scoreConfidence(rmseMeters float64, sensors int) string {
 	return "low"
 }
 
-func decodeICAO(msg []byte) string {
-	if len(msg) >= 4 {
-		df := msg[0] >> 3
-		if df == 17 || df == 18 {
-			return strings.ToUpper(hex.EncodeToString(msg[1:4]))
+func decodeICAO(msg []byte) (string, bool) {
+	if len(msg) != 14 {
+		return "", false
+	}
+
+	df := msg[0] >> 3
+	if df != 17 {
+		return "", false
+	}
+
+	typeCode := msg[4] >> 3
+	if typeCode < 9 || typeCode > 18 {
+		return "", false
+	}
+
+	return strings.ToUpper(hex.EncodeToString(msg[1:4])), true
+}
+
+func withinNetworkEnvelope(solution Vec3, obs []ReceiverObservation) bool {
+	var center Vec3
+	for _, o := range obs {
+		center.X += o.Receiver.Position.X
+		center.Y += o.Receiver.Position.Y
+		center.Z += o.Receiver.Position.Z
+	}
+	n := float64(len(obs))
+	center.X /= n
+	center.Y /= n
+	center.Z /= n
+
+	maxReceiverRadius := 0.0
+	for _, o := range obs {
+		r := distance(o.Receiver.Position, center)
+		if r > maxReceiverRadius {
+			maxReceiverRadius = r
 		}
 	}
 
-	sum := sha1.Sum(msg)
-	return strings.ToUpper(hex.EncodeToString(sum[:3]))
+	d := distance(solution, center)
+	maxAllowed := math.Max(350000, maxReceiverRadius+250000)
+	return d <= maxAllowed
 }
