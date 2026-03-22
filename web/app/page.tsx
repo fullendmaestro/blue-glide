@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import type * as Leaflet from "leaflet"
-import { Radar, TowerControl } from "lucide-react"
 
 import { api } from "@/lib/api"
 import type { AircraftEstimate, FeedEvent, SensorSnapshot, StatsSnapshot } from "@/lib/types"
@@ -40,10 +39,14 @@ export default function Page() {
   const [status, setStatus] = useState<"connecting" | "live" | "down">("connecting")
   const [sensors, setSensors] = useState<SensorSnapshot[]>([])
   const [aircraft, setAircraft] = useState<AircraftEstimate[]>([])
+  const [aircraftOrder, setAircraftOrder] = useState<string[]>([])
   const [stats, setStats] = useState<StatsSnapshot>(FALLBACK_STATS)
   const [error, setError] = useState<string>("")
 
-  const activeAircraft = useMemo(() => aircraft.slice(0, 40), [aircraft])
+  const activeAircraft = useMemo(() => {
+    const byIcao = new Map(aircraft.map((item) => [item.icao, item]))
+    return aircraftOrder.map((icao) => byIcao.get(icao)).filter((item): item is AircraftEstimate => item !== undefined)
+  }, [aircraft, aircraftOrder])
 
   useEffect(() => {
     let mounted = true
@@ -61,6 +64,10 @@ export default function Page() {
         }
         setSensors(initialSensors)
         setAircraft(initialAircraft)
+        setAircraftOrder((prev) => {
+          if (prev.length > 0) return prev
+          return initialAircraft.map((item) => item.icao)
+        })
         setStats(initialStats)
       } catch (e) {
         setError(e instanceof Error ? e.message : "Unable to reach MLAT API")
@@ -88,7 +95,7 @@ export default function Page() {
       }).setView(DEFAULT_CENTER, DEFAULT_ZOOM)
       mapRef.current = map
 
-      L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+      L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
         attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
       }).addTo(map)
 
@@ -184,11 +191,15 @@ export default function Page() {
           if (idx >= 0) {
             const updated = [...prev]
             updated[idx] = next
-            updated.sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))
             return updated
           }
 
-          return [next, ...prev].slice(0, 120)
+          return [...prev, next]
+        })
+
+        setAircraftOrder((prev) => {
+          if (prev.includes(payload.id)) return prev
+          return [...prev, payload.id]
         })
 
         const existingFlightMarker = markersRef.current.aircraft[payload.id]
@@ -271,89 +282,54 @@ export default function Page() {
     setStats((prev) => ({
       ...prev,
       active_sensors: sensors.length,
-      tracked_aircraft: aircraft.length,
+      tracked_aircraft: aircraftOrder.length,
     }))
-  }, [aircraft.length, sensors.length])
+  }, [aircraftOrder.length, sensors.length])
 
   return (
-    <main className="hud-root">
-      <div className="hud-shell">
-        <header className="hud-header">
-          <div>
-            <p className="hud-kicker">4DSKY CHALLENGE</p>
-            <h1>Blue Glide Multilateration Console</h1>
-          </div>
-          <div className="status-wrap">
+    <main className="tracker-shell">
+      <aside className="tracker-sidebar">
+        <header className="tracker-header">
+          <h1>Blue-Glide Oracle</h1>
+          <p className="status-line">
             <span className={`status-dot ${status}`} />
-            <span className="status-text">
-              {status === "live" ? "LIVE FEED" : status === "connecting" ? "CONNECTING" : "RECONNECTING"}
-            </span>
+            {status === "live" ? "Network Connected" : status === "connecting" ? "Connecting" : "Reconnecting"}
+          </p>
+          <div className="tracker-stats">
+            <span>Sensors: {stats.active_sensors}</span>
+            <span>Aircraft: {stats.tracked_aircraft}</span>
+            <span>Packets: {stats.total_packets.toLocaleString()}</span>
           </div>
         </header>
 
-        <section className="metrics">
-          <article className="metric-card">
-            <TowerControl size={16} />
-            <div>
-              <p>Sensors</p>
-              <strong>{stats.active_sensors}</strong>
-            </div>
-          </article>
-          <article className="metric-card">
-            <Radar size={16} />
-            <div>
-              <p>Tracked Aircraft</p>
-              <strong>{stats.tracked_aircraft}</strong>
-            </div>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Packets</span>
-            <strong>{stats.total_packets.toLocaleString()}</strong>
-          </article>
-          <article className="metric-card">
-            <span className="metric-label">Solved</span>
-            <strong>{stats.solved_clusters.toLocaleString()}</strong>
-          </article>
-        </section>
+        {error ? <p className="error-callout">{error}</p> : null}
 
-        <section className="workspace">
-          <aside className="aircraft-panel">
-            <div className="panel-title-row">
-              <h2>Latest Solutions</h2>
-              <span className="chip">{activeAircraft.length} on scope</span>
-            </div>
+        <ul className="aircraft-list">
+          {activeAircraft.length === 0 ? (
+            <li className="empty-state">Waiting for clusters with 3+ sensors...</li>
+          ) : (
+            activeAircraft.map((flight) => (
+              <li key={flight.icao} className="aircraft-item">
+                <div className="flight-top">
+                  <h2>{flight.icao}</h2>
+                  <span className={confidenceClass(flight.confidence)}>{flight.confidence}</span>
+                </div>
+                <p>
+                  {flight.lat.toFixed(5)}, {flight.lon.toFixed(5)} | alt {Math.round(flight.alt)} m
+                </p>
+                <p>
+                  residual {Math.round(flight.residual_m)} m with {flight.sensors} sensors
+                </p>
+                <p className="mono">hex {flight.raw_hex.slice(0, 18)}...</p>
+              </li>
+            ))
+          )}
+        </ul>
+      </aside>
 
-            {error ? <p className="error-callout">{error}</p> : null}
-
-            <ul className="aircraft-list">
-              {activeAircraft.length === 0 ? (
-                <li className="empty-state">Waiting for clusters with 3+ sensors...</li>
-              ) : (
-                activeAircraft.map((flight) => (
-                  <li key={flight.icao} className="aircraft-item">
-                    <div className="flight-top">
-                      <h3>{flight.icao}</h3>
-                      <span className={confidenceClass(flight.confidence)}>{flight.confidence}</span>
-                    </div>
-                    <p>
-                      {flight.lat.toFixed(5)}, {flight.lon.toFixed(5)} | alt {Math.round(flight.alt)} m
-                    </p>
-                    <p>
-                      residual {Math.round(flight.residual_m)} m with {flight.sensors} sensors
-                    </p>
-                    <p className="mono">{flight.raw_hex.slice(0, 22)}...</p>
-                  </li>
-                ))
-              )}
-            </ul>
-          </aside>
-
-          <div className="map-wrap">
-            <div className="map-overlay" />
-            <div ref={mapNodeRef} className="map-canvas" />
-          </div>
-        </section>
-      </div>
+      <section className="map-wrap">
+        <div ref={mapNodeRef} className="map-canvas" />
+      </section>
     </main>
   )
 }

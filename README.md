@@ -1,273 +1,149 @@
-# 4dsky MLAT Challenge
+# Blue Glide Neuron Challenge
 
-A quickstart project to help you understand how to buy 4dskyEdge data and perform multilateration using the Neuron Go Hedera SDK.
+Blue Glide is a buyer-side Neuron challenge project that ingests live Mode-S frames from sellers, solves aircraft position with multilateration (MLAT), and serves real-time results to a web dashboard.
 
-## Overview
+## What This Project Does
 
-This program is here to help you understand buying 4dskyEdge data. The application demonstrates how to connect to sellers and receive ModeS data streams over the Hedera network using the Neuron SDK. The buyer implementation is functional and will receive raw ModeS data from any connected seller peer. The seller case is currently an empty and doesn't need to be implemented.
+- Connects as a Neuron buyer to multiple sellers
+- Reads structured Mode-S packets (sensor metadata + timestamps + raw frame)
+- Applies sensor location overrides from `location-override.json`
+- Groups multi-sensor observations of the same transmission
+- Solves position using TDOA-based MLAT in ECEF
+- Exposes live state over REST and server-sent events (SSE)
+- Displays aircraft and sensor activity in a Next.js map UI
 
-## Implemented Solution
-
-This repository now includes an end-to-end MLAT implementation with a backend server and a live frontend dashboard.
+## Architecture
 
 ### Backend (Go)
 
-The backend has been refactored from a monolithic `main.go` into separate files by responsibility:
+- `main.go`: application entrypoint using Neuron SDK
+- `app.go`: orchestration (stream handling, receiver lifecycle)
+- `packet.go`: stream packet parsing
+- `location.go`: location override loading and application
+- `geometry.go`: WGS84 LLH <-> ECEF math
+- `mlat_solver.go`: iterative least-squares solver
+- `mlat_tracker.go`: message grouping and solve trigger
+- `sensor_manager.go`: in-memory state and metrics
+- `event_bus.go`: pub/sub for streaming events
+- `api_server.go`: REST + SSE server on `:8080`
+- `models.go`: shared domain models
 
-- `packet.go`: byte stream parsing into `ModeSPacket`
-- `location.go`: location override loading/applying from `location-override.json`
-- `geometry.go`: WGS84 LLH <-> ECEF conversions
-- `mlat_solver.go`: TDOA least-squares multilateration solver
-- `mlat_tracker.go`: message grouping, cluster resolution, confidence scoring
-- `sensor_manager.go`: in-memory state for sensors, aircraft, stats
-- `event_bus.go`: pub/sub event fanout for SSE
-- `api_server.go`: HTTP API + server-sent events
-- `app.go`: stream orchestration and wiring
-- `main.go`: Neuron SDK entrypoint and startup
+### Frontend (Next.js)
 
-### HTTP API
+- Hydrates from REST endpoints
+- Streams updates from `/events`
+- Renders sensors + aircraft on a live Leaflet map
+- Shows solution confidence, residual, and sensor counts
 
-The backend runs an API server on `:8080` with:
+## API
+
+Backend runs on `http://localhost:8080`:
 
 - `GET /api/health`
 - `GET /api/sensors`
 - `GET /api/aircraft`
 - `GET /api/stats`
-- `GET /events` (SSE stream)
+- `GET /events` (SSE)
 
-### Frontend (Next.js)
+Frontend dev server runs on `http://localhost:3000` and proxies:
 
-The web app has been rebuilt to consume the backend API and SSE stream:
-
-- Initial hydration from `/api/sensors`, `/api/aircraft`, `/api/stats`
-- Real-time map updates via `/events`
-- Live metrics and confidence-highlighted aircraft cards
-
-## The 4dsky MLAT Challenge
-
-This repository is set up as a challenge to help you understand multilateration (MLAT) using ModeS data.
-
-### Challenge Steps:
-0. Get credentials from neuron (see below how), port forward 61336 on your router. 
-1. **Try the simple main file** - Get some bytes
-   - Start with `main.go` to understand the basic connection
-   - Run it and observe the raw byte stream coming from sellers
-   - This helps you see how the connection works
-
-2. **Try the second main file** - Get raw data
-   - Rename `main.go` to `main.go.bak`
-   - Rename `main-half-4dsky.go.bak` to `main.go`
-   - Run it again and observe the structured data output
-   - You'll see sensor positions, timestamps, and raw ModeS frames
-
-
-
-3. **The Challenge: Can you multilaterate the frames?**
-   - The timestamps are super accurate (nanosecond precision)
-   - You have sensor positions (latitude, longitude, altitude) for each frame
-   - You have raw ModeS data with precise timestamps
-   - **Can you use multilateration to calculate aircraft positions?**
-
-### What is Multilateration?
-
-Multilateration (MLAT) is a technique that uses the time difference of arrival (TDOA) of signals from multiple sensors to determine the position of an aircraft. With accurate timestamps and known sensor positions, you can calculate where an aircraft is located.
-
-## Get Your Credentials
-
-**You will need buyer credentials and a list of sellers to buy from.**
-
-**Some sellers don't reveal their true location, you will also receive the exact locations to override their reported location**
-
-To kick things off: join our Discord channel to get started: 
-https://discord.gg/PeAbrrrq7Z
-
-Simply come join, say hi and say that you need creds and locations for the neuron 4Dsky challenge. We'll help you get set up with:
-- Buyer credentials to connect to the network
-- A list of sellers and locations to buy from (available only on Hackathon kickoff day)
-- Any help you need along the way
-
-If you need help or want to discuss solutions during the challenge, the Discord is the place to be!
+- `/api/*` -> `http://localhost:8080/api/*`
+- `/events` -> `http://localhost:8080/events`
 
 ## Prerequisites
 
-### Environment
-- **VS Code** (Visual Studio Code) - Recommended IDE for running this project
-- **Go Extension for VS Code** - Required for Go language support and debugging
-- **Port forward 61336 on your router**
-
-### Dependencies
-- **Golang** (Go) - Version 1.24.6 or compatible (see `go.mod` for exact version)
-- Go toolchain 1.24.10
-
-### Network Configuration
-**IMPORTANT:** In order to run these files, you need to port forward at your router (open the port) that is declared in the launcher configuration. The buyer mode uses port `61336` in this configuration.
+- Go 1.24.x
+- Node.js 20+ (or Bun)
+- Buyer credentials in `.buyer-env`
+- Router/host port forwarding for UDP `61336` if required by your network
 
 ## Setup
 
-1. **Clone or download this repository**
+1. Install Go dependencies:
 
-2. **Install dependencies:**
-   ```bash
-   go mod download
-   ```
+```bash
+go mod download
+```
 
-3. **Set up environment files:**
-   - Copy `.buyer-env.example` to `.buyer-env` and fill in your actual credentials from Discord
-   - Make sure to include the `list_of_sellers` field with the seller peer IDs you received
-   
-   **Note:** The `.env` files contain sensitive information and are gitignored. Never commit them to version control.
+2. Prepare buyer environment file:
 
-## Running the Application
+```bash
+cp .buyer-env.example .buyer-env
+```
 
-## Run The Full Stack
+3. Fill `.buyer-env` with challenge-provided values (especially seller list and credentials).
 
-1. Start backend (root folder):
+4. Optional frontend install:
+
+```bash
+cd web
+npm install
+```
+
+## Run (Recommended)
+
+### Terminal 1: backend
+
+Run from repository root:
 
 ```bash
 go run . --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
 ```
 
-2. Start frontend (new terminal):
+Important: use `go run .` (dot), not `go run main.go`. The project is split across multiple Go files.
+
+### Terminal 2: frontend
+
+From `web`:
 
 ```bash
-cd web
-npm install
 npm run dev
 ```
 
-3. Open `http://localhost:3000`
-
-The frontend uses rewrites in `web/next.config.mjs` so `/api/*` and `/events` are proxied to `http://localhost:8080`.
-
-### Running in Buyer Mode
-
-**To run this demo, you need the buyer environment file (`.buyer-env`) and launch in buyer mode.**
-
-The easiest way to run the application in buyer mode is using the VS Code launch configuration:
-
-1. Open the project in **VS Code**
-2. Ensure you have the **Go extension** installed
-3. Navigate to the Run and Debug panel (or press `F5`)
-4. Select **"Run buyer"** from the configuration dropdown
-5. Click the play button or press `F5` to start
-
-The launch configuration will automatically:
-- Run the program in debug mode
-- Use port `61336`
-- Set mode to `peer`
-- Configure the buyer role
-- Load environment variables from `.buyer-env`
-
-### Manual Command Line Execution
-
-Alternatively, you can run the buyer mode from the command line:
+Or with Bun:
 
 ```bash
-go run main.go --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
+bun run dev
 ```
 
-## How It Works
+Then open `http://localhost:3000`.
 
-### Buyer Mode
+## Common Runtime Notes
 
-When running in buyer mode, the application will:
+### `undefined: NewBlueGlideApp`
 
-1. Connect to sellers specified in your `.buyer-env` file
-2. Establish peer-to-peer streams using the `neuron/ADSB/0.0.2` protocol
-3. Receive **super raw ModeS streams** from connected seller peers
-4. Print received data to the console
+Cause: running only one file.
 
-The buyer implementation includes:
-- Stream handler setup for receiving data
-- Connection management and monitoring
-- Topic message callback for Hedera topic messages
+Fix:
 
-### Seller Mode
-
-The seller case is currently an **empty stub** and you don't need to fill it out for this challenge.
-
-## Two Main Files - Instructional Examples
-
-This repository contains two main files for instructional purposes:
-
-### 1. `main.go` - Simple Connection Example
-
-The `main.go` file is a very simple example where only the buyer block is declared and it reads one byte at a time from whoever you are connected to. That's pretty useless for actual data processing, but it helps you see how to connect and establish a stream with a seller.
-
-**What it does:**
-- Establishes a connection with sellers
-- Reads one byte at a time from the stream
-- Prints each byte in hexadecimal format
-- Demonstrates basic stream handling
-
-**To run:**
 ```bash
-go run main.go --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
+go run . --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
 ```
 
-### 2. `main-half-4dsky.go.bak` - Structured Data Parsing Example
+### `stream read stopped: deadline exceeded`
 
-The `main-half-4dsky.go.bak` file demonstrates how to parse the structured byte stream format. This time you will see that you are unpacking the structure of what is read and you are receiving ModeS data raw.
+This means a stream read timed out waiting for the next packet. It can occur under sparse traffic, peer pauses, or idle intervals.
 
-**What it does:**
-- Reads the length-prefixed packet structure
-- Extracts sensor ID, position (lat/lon/alt), timestamps, and raw ModeS data
-- Prints all parsed information to the console
-- Does NOT convert to positional messages - only shows raw ModeS and metadata
+- If streams reconnect and data continues, it is often transient.
+- If it is frequent and no data appears, increase read timeout handling in stream loop and verify seller activity.
 
-**To use this file:**
-1. Rename `main.go` to `main.go.bak` (or any backup name)
-2. Rename `main-half-4dsky.go.bak` to `main.go`
-3. Run it again using the same command:
-   ```bash
-   go run main.go --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
-   ```
+### UDP buffer warning from quic-go
 
-This time you will see structured output showing:
-- Sensor ID (int64)
-- Sensor position (latitude, longitude, altitude)
-- Timestamps (seconds since midnight, nanoseconds)
-- Raw ModeS message data (hex and byte format)
+Example warning about receive buffer not reaching requested size can be normal on some hosts. It is advisory unless packet loss/instability is observed.
 
-## Protocol
+## Challenge Guidance
 
-This application uses the `neuron/ADSB/0.0.2` protocol for peer-to-peer communication over the Hedera network.
+- Start by validating sensor connectivity and packet ingestion.
+- Confirm sensor locations (and overrides) are accurate.
+- Ensure at least 3 sensors observe the same transmission for MLAT.
+- Track residual and confidence metrics to judge solution quality.
+- Iterate on clustering window and solver constraints for stability.
 
-## Configuration
+## Security
 
-### Buyer Environment Variables (`.buyer-env`)
-- `eth_rpc_url` - Ethereum RPC endpoint
-- `hedera_evm_id` - Hedera EVM account ID
-- `hedera_id` - Hedera account ID
-- `location` - Geographic location (lat/lon/alt)
-- `mirror_api_url` - Hedera mirror node API URL
-- `private_key` - Private key for authentication
-- `smart_contract_address` - Smart contract address
-- `list_of_sellers` - List of seller peer IDs to connect to
-
-
-## Development
-
-The project structure:
-- `main.go` - Simple example that reads one byte at a time (connection demonstration)
-- `main-half-4dsky.go.bak` - Structured parsing example (rename to `main.go` to use)
-- `.vscode/launch.json` - VS Code debug configurations
-- `.buyer-env.example` / `.seller-env.example` - Environment file templates
-- `go.mod` / `go.sum` - Go module dependencies
-
-## Notes
-
-- **main.go**: Receives raw ModeS data as individual bytes and prints them in hexadecimal format (`%x`). Useful for understanding the connection process.
-- **main-half-4dsky.go.bak**: Parses the structured byte stream format and prints:
-  - Sensor ID (int64)
-  - Sensor position (latitude, longitude, altitude)
-  - Timestamps (seconds since midnight, nanoseconds)
-  - Raw ModeS message data (hex and byte format)
-- Stream connections are monitored and will log when closed
-- The seller implementation is a placeholder
-- Both main files demonstrate different approaches to reading the seller's data stream
-- **Remember to port forward the ports in your router** (buyer: 61336)
+- Never commit `.buyer-env` or private keys.
+- Keep credentials local.
 
 ## License
 
-See the repository license file for details.
+See repository license information.
