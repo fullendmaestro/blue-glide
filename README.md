@@ -2,6 +2,10 @@
 
 Blue Glide is a buyer-side Neuron challenge project that ingests live Mode-S frames from sellers, solves aircraft position with multilateration (MLAT), and serves real-time results to a web dashboard.
 
+## Demo
+
+![Blue Glide demo](./blue-glider.gif)
+
 ## What This Project Does
 
 - Connects as a Neuron buyer to multiple sellers
