@@ -6,6 +6,43 @@ A quickstart project to help you understand how to buy 4dskyEdge data and perfor
 
 This program is here to help you understand buying 4dskyEdge data. The application demonstrates how to connect to sellers and receive ModeS data streams over the Hedera network using the Neuron SDK. The buyer implementation is functional and will receive raw ModeS data from any connected seller peer. The seller case is currently an empty and doesn't need to be implemented.
 
+## Implemented Solution
+
+This repository now includes an end-to-end MLAT implementation with a backend server and a live frontend dashboard.
+
+### Backend (Go)
+
+The backend has been refactored from a monolithic `main.go` into separate files by responsibility:
+
+- `packet.go`: byte stream parsing into `ModeSPacket`
+- `location.go`: location override loading/applying from `location-override.json`
+- `geometry.go`: WGS84 LLH <-> ECEF conversions
+- `mlat_solver.go`: TDOA least-squares multilateration solver
+- `mlat_tracker.go`: message grouping, cluster resolution, confidence scoring
+- `sensor_manager.go`: in-memory state for sensors, aircraft, stats
+- `event_bus.go`: pub/sub event fanout for SSE
+- `api_server.go`: HTTP API + server-sent events
+- `app.go`: stream orchestration and wiring
+- `main.go`: Neuron SDK entrypoint and startup
+
+### HTTP API
+
+The backend runs an API server on `:8080` with:
+
+- `GET /api/health`
+- `GET /api/sensors`
+- `GET /api/aircraft`
+- `GET /api/stats`
+- `GET /events` (SSE stream)
+
+### Frontend (Next.js)
+
+The web app has been rebuilt to consume the backend API and SSE stream:
+
+- Initial hydration from `/api/sensors`, `/api/aircraft`, `/api/stats`
+- Real-time map updates via `/events`
+- Live metrics and confidence-highlighted aircraft cards
+
 ## The 4dsky MLAT Challenge
 
 This repository is set up as a challenge to help you understand multilateration (MLAT) using ModeS data.
@@ -81,6 +118,26 @@ If you need help or want to discuss solutions during the challenge, the Discord 
    **Note:** The `.env` files contain sensitive information and are gitignored. Never commit them to version control.
 
 ## Running the Application
+
+## Run The Full Stack
+
+1. Start backend (root folder):
+
+```bash
+go run . --port=61336 --mode=peer --buyer-or-seller=buyer --list-of-sellers-source=env --envFile=.buyer-env
+```
+
+2. Start frontend (new terminal):
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+3. Open `http://localhost:3000`
+
+The frontend uses rewrites in `web/next.config.mjs` so `/api/*` and `/events` are proxied to `http://localhost:8080`.
 
 ### Running in Buyer Mode
 
